@@ -11,6 +11,8 @@ npm run dev
 
 Produktionsprüfung: `npm run build`
 
+Cloudflare-Veröffentlichung: `npm run deploy`. Der fest versionierte FFmpeg-WASM-Kern wird beim ersten Einsatz von jsDelivr geladen und anschließend vom Service Worker offline gespeichert; Nutzermedien verlassen das Gerät nicht.
+
 ## MVP
 
 - Einzelauswahl aus Fotos oder Dateien

@@ -1,0 +1,10 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "kompakt-media",
+  "account_id": "709e30285177615d390ea7c56c218c8a",
+  "compatibility_date": "2026-08-23",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  }
+}

@@ -1,8 +1,9 @@
 /// <reference lib="webworker" />
 import type { FFmpeg as FFmpegType } from '@ffmpeg/ffmpeg';
 import coreURL from '@ffmpeg/core?url';
-import wasmURL from '@ffmpeg/core/wasm?url';
 import type { MediaInfo, WorkerRequest, WorkerResponse } from './types';
+
+const wasmURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm/ffmpeg-core.wasm';
 
 const ctx: DedicatedWorkerGlobalScope = self as unknown as DedicatedWorkerGlobalScope;
 let ffmpeg: FFmpegType | null = null;
