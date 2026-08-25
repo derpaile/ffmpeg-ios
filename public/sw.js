@@ -1,4 +1,4 @@
-const CACHE = 'kompakt-v5';
+const CACHE = 'kompakt-v6';
 const SHELL = ['/', '/index.html', '/manifest.webmanifest', '/icons/icon-192.svg', '/icons/icon-512.svg'];
 const DEVELOPMENT = location.port && !['80', '443'].includes(location.port);
 

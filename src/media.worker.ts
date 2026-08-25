@@ -11,29 +11,125 @@ import {
   Mp4OutputFormat,
   Output,
   Quality,
+  registerVideoSampleTransformer,
   StreamTarget,
+  VideoSample,
   WavOutputFormat,
   type AudioCodec,
   type ConversionAudioOptions,
+  type ConversionVideoOptions,
   type OutputFormat,
-  type StreamTargetChunk
+  type StreamTargetChunk,
+  type VideoCodec,
+  type VideoSampleTransformationDescription
 } from 'mediabunny';
 import {
   AUDIO_BITRATES,
   estimatedAudioSize,
+  estimatedManualVideoSize,
   estimatedVideoSize,
   targetDimensions,
   targetVideoBitrate
 } from './presets';
-import type { MediaInfo, OutputFormatId, PresetId, WorkerRequest, WorkerResponse } from './types';
+import type {
+  ManualVideoSettings,
+  MediaInfo,
+  OutputFormatId,
+  PresetId,
+  ProcessLogLevel,
+  ScalerMode,
+  WorkerRequest,
+  WorkerResponse
+} from './types';
 
 const ctx: DedicatedWorkerGlobalScope = self as unknown as DedicatedWorkerGlobalScope;
 
 let inputFile: File | null = null;
 let inputInfo: MediaInfo | null = null;
 let mediaInput: Input | null = null;
+let activeScaler: ScalerMode | null = null;
+let processStartedAt = 0;
+let logId = 0;
+let scalerFallbackReported = false;
 
 const send = (message: WorkerResponse) => ctx.postMessage(message);
+
+function formatBytes(bytes: number) {
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+  return `${Math.round(bytes / 1024 ** 2)} MB`;
+}
+
+function formatRate(bitrate: number) {
+  return bitrate >= 1_000_000 ? `${(bitrate / 1_000_000).toFixed(1)} Mbit/s` : `${Math.round(bitrate / 1000)} kbit/s`;
+}
+
+function log(title: string, detail: string, level: ProcessLogLevel = 'info') {
+  send({
+    type: 'log',
+    entry: {
+      id: ++logId,
+      elapsed: processStartedAt ? (performance.now() - processStartedAt) / 1000 : 0,
+      level,
+      title,
+      detail
+    }
+  });
+}
+
+function startLog() {
+  processStartedAt = performance.now();
+  logId = 0;
+  scalerFallbackReported = false;
+}
+
+let scaleCanvas: OffscreenCanvas | null = null;
+let scaleContext: OffscreenCanvasRenderingContext2D | null = null;
+let scaleCanvasKey = '';
+
+function fastScale(sample: VideoSample, description: VideoSampleTransformationDescription) {
+  if (!activeScaler || activeScaler === 'quality') return null;
+  try {
+    const key = `${description.width}x${description.height}:${description.alpha}`;
+    if (!scaleCanvas || !scaleContext || scaleCanvasKey !== key) {
+      scaleCanvas = new OffscreenCanvas(description.width, description.height);
+      scaleContext = scaleCanvas.getContext('2d', {
+        alpha: description.alpha === 'keep',
+        desynchronized: true
+      });
+      if (!scaleContext) return null;
+      scaleCanvasKey = key;
+    }
+
+    scaleContext.imageSmoothingEnabled = true;
+    scaleContext.imageSmoothingQuality = activeScaler === 'fast' ? 'low' : 'high';
+    scaleContext.globalCompositeOperation = 'source-over';
+    if (description.alpha === 'discard') {
+      scaleContext.fillStyle = 'black';
+      scaleContext.fillRect(0, 0, description.width, description.height);
+    } else {
+      scaleContext.clearRect(0, 0, description.width, description.height);
+    }
+    sample.drawWithFit(scaleContext, {
+      fit: description.fit,
+      rotation: description.rotation,
+      crop: description.crop
+    });
+    return new VideoSample(scaleCanvas, {
+      timestamp: sample.timestamp,
+      duration: sample.duration,
+      rotation: 0,
+      encodeOptions: sample.encodeOptions
+    });
+  } catch {
+    if (!scalerFallbackReported) {
+      scalerFallbackReported = true;
+      log('Kompatibilitätsmodus', 'Der Browser übernimmt die Skalierung dieses Pixelformats.', 'warning');
+    }
+    return null;
+  }
+}
+
+registerVideoSampleTransformer(fastScale);
 
 async function analyze(file: File) {
   send({ type: 'phase', phase: 'Medium wird analysiert' });
@@ -190,12 +286,17 @@ async function audioTranscode(preset: PresetId, formatId: Exclude<OutputFormatId
   const expectedBytes = estimatedAudioSize(inputInfo, preset, formatId);
   const settings = audioOutputSettings(formatId, expectedBytes);
   const fileName = outputName(formatId);
+  startLog();
+  log('Quelle geprüft', `${inputInfo.format} · ${inputInfo.codec} · ${formatBytes(inputInfo.size)}`, 'success');
+  log('Ausgabe geplant', `${formatId.toUpperCase()} · ungefähr ${formatBytes(expectedBytes)}`);
 
   const lossless = formatId === 'wav' || formatId === 'flac';
   const encoding = lossyAudioConfig(preset);
   if (settings.codec === 'aac' || settings.codec === 'mp3') {
+    log('Audio-Encoder', `${settings.codec.toUpperCase()} mit ${formatRate(AUDIO_BITRATES[preset])}`);
     await registerAudioEncoder(settings.codec, encoding);
   } else if (settings.codec === 'flac') {
+    log('Audio-Encoder', 'FLAC · verlustfrei');
     await registerAudioEncoder('flac', {
       numberOfChannels: Math.max(1, inputInfo.channels || 2),
       sampleRate: Math.max(8_000, inputInfo.sampleRate || 48_000)
@@ -206,6 +307,7 @@ async function audioTranscode(preset: PresetId, formatId: Exclude<OutputFormatId
     ? inputInfo.duration * (inputInfo.sampleRate || 48_000) * Math.max(1, inputInfo.channels || 2) * 2
     : expectedBytes;
   const { root, target } = await createOutputTarget(fileName, storageBytes);
+  log('Lokaler Speicher bereit', 'Ausgabe wird ohne Arbeitsspeicher-Limit gestreamt.', 'success');
 
   let output: Output | null = null;
   let conversion: Conversion | null = null;
@@ -227,8 +329,9 @@ async function audioTranscode(preset: PresetId, formatId: Exclude<OutputFormatId
     if (!conversion.isValid || conversion.discardedTracks.some(({ track }) => track.type === 'audio')) {
       throw new Error('Die Audiospur kann nicht in das gewählte Format umgewandelt werden.');
     }
-    conversion.onProgress = (progress, time) => send({ type: 'progress', progress, time, hardware: false });
+    conversion.onProgress = (progress, time) => send({ type: 'progress', progress, time, hardwarePreferred: false });
     send({ type: 'phase', phase: formatId === 'flac' ? 'FLAC wird verlustfrei erzeugt' : 'Audio wird lokal verarbeitet' });
+    log('Verarbeitung läuft', 'Dekodieren, umwandeln und schreiben erfolgen lokal.');
     await conversion.execute();
   } catch (error) {
     if (conversion) await conversion.cancel().catch(() => {});
@@ -237,91 +340,246 @@ async function audioTranscode(preset: PresetId, formatId: Exclude<OutputFormatId
     throw error;
   }
 
-  send({ type: 'done', fileName, mime: settings.mime, hardware: false });
+  log('Ausgabe abgeschlossen', fileName, 'success');
+  send({ type: 'done', fileName, mime: settings.mime, hardwarePreferred: false });
 }
 
-async function videoTranscode(preset: PresetId) {
+type ResolvedVideoSettings = {
+  width: number;
+  height: number;
+  fit: 'contain' | 'cover' | 'fill';
+  rotation: 0 | 90 | 180 | 270;
+  crop?: { left: number; top: number; width: number; height: number };
+  codec: VideoCodec;
+  quality: Quality;
+  bitrate: number;
+  frameRate?: number;
+  keyFrameInterval: number;
+  hardwareAcceleration: 'prefer-hardware' | 'no-preference' | 'prefer-software';
+  scaler: ScalerMode;
+  audioMode: 'auto' | 'copy' | 'aac' | 'discard';
+  audioBitrate: number;
+  audioChannels: number;
+  audioSampleRate: number;
+  trim?: { start?: number; end?: number };
+  preserveMetadata: boolean;
+  manual: boolean;
+};
+
+function finiteInt(value: number, fallback: number, min: number, max: number) {
+  return Number.isFinite(value) ? Math.min(max, Math.max(min, Math.round(value))) : fallback;
+}
+
+function resolveVideoSettings(preset: PresetId, manual?: ManualVideoSettings): ResolvedVideoSettings {
+  if (!inputInfo) throw new Error('Bitte zuerst ein Video auswählen.');
+  if (!manual) {
+    const dimensions = targetDimensions(inputInfo, preset);
+    const bitrate = targetVideoBitrate(inputInfo, preset);
+    return {
+      ...dimensions,
+      fit: 'contain',
+      rotation: 0,
+      codec: 'avc',
+      quality: new Quality({ bitrate, bitrateMode: 'variable' }),
+      bitrate,
+      keyFrameInterval: 5,
+      hardwareAcceleration: 'prefer-hardware',
+      scaler: preset === 'small' ? 'fast' : 'balanced',
+      audioMode: 'auto',
+      audioBitrate: AUDIO_BITRATES[preset],
+      audioChannels: Math.max(1, Math.min(2, inputInfo.channels || 2)),
+      audioSampleRate: Math.max(8_000, Math.min(48_000, inputInfo.sampleRate || 48_000)),
+      preserveMetadata: true,
+      manual: false
+    };
+  }
+
+  const width = Math.ceil(finiteInt(manual.width, inputInfo.width, 2, 8192) / 2) * 2;
+  const height = Math.ceil(finiteInt(manual.height, inputInfo.height, 2, 8192) / 2) * 2;
+  const bitrate = finiteInt(manual.bitrate, 5_000_000, 100_000, 100_000_000);
+  const trimStart = Math.min(inputInfo.duration, Math.max(0, Number(manual.trimStart) || 0));
+  const trimEnd = Math.min(inputInfo.duration, Math.max(0, Number(manual.trimEnd) || 0));
+  if (trimEnd > 0 && trimEnd <= trimStart) throw new Error('Das Ende des Ausschnitts muss hinter dem Start liegen.');
+  const crop = manual.cropEnabled ? {
+    left: Math.max(0, finiteInt(manual.cropLeft, 0, 0, 8192)),
+    top: Math.max(0, finiteInt(manual.cropTop, 0, 0, 8192)),
+    width: finiteInt(manual.cropWidth, width, 2, 8192),
+    height: finiteInt(manual.cropHeight, height, 2, 8192)
+  } : undefined;
+
+  return {
+    width,
+    height,
+    fit: manual.fit,
+    rotation: manual.rotation,
+    crop,
+    codec: manual.codec,
+    quality: manual.rateControl === 'quantizer'
+      ? new Quality({ quantizer: finiteInt(manual.quantizer, 23, 0, 63), bitrate })
+      : new Quality({ bitrate, bitrateMode: manual.bitrateMode }),
+    bitrate,
+    frameRate: manual.frameRate > 0 ? Math.min(120, manual.frameRate) : undefined,
+    keyFrameInterval: Math.min(30, Math.max(0.25, manual.keyFrameInterval || 5)),
+    hardwareAcceleration: manual.hardwareAcceleration,
+    scaler: manual.scaler,
+    audioMode: manual.audioMode,
+    audioBitrate: finiteInt(manual.audioBitrate, 128_000, 32_000, 512_000),
+    audioChannels: manual.audioChannels > 0 ? finiteInt(manual.audioChannels, 2, 1, 8) : Math.max(1, inputInfo.channels || 2),
+    audioSampleRate: manual.audioSampleRate > 0 ? finiteInt(manual.audioSampleRate, 48_000, 8_000, 192_000) : Math.max(8_000, inputInfo.sampleRate || 48_000),
+    trim: trimStart > 0 || trimEnd > 0 ? { start: trimStart || undefined, end: trimEnd || undefined } : undefined,
+    preserveMetadata: manual.preserveMetadata,
+    manual: true
+  };
+}
+
+async function videoTranscode(preset: PresetId, manual?: ManualVideoSettings) {
   if (!inputFile || !inputInfo || !mediaInput || inputInfo.audioOnly) throw new Error('Bitte zuerst ein Video auswählen.');
+  startLog();
+  const plan = resolveVideoSettings(preset, manual);
   const videoTrack = await mediaInput.getPrimaryVideoTrack();
   if (!videoTrack || !await videoTrack.canDecode()) {
     throw new Error('Der Videocodec kann auf diesem Gerät nicht über WebCodecs gelesen werden.');
   }
+  log('Quelle geprüft', `${inputInfo.format} · ${inputInfo.codec} · ${inputInfo.width} × ${inputInfo.height} · ${formatBytes(inputInfo.size)}`, 'success');
+  if (inputInfo.hdr) log('HDR erkannt', 'Der schnelle Canvas-Pfad überführt das Bild browserabhängig nach SDR.', 'warning');
 
-  const dimensions = targetDimensions(inputInfo, preset);
-  const quality = new Quality({ bitrate: targetVideoBitrate(inputInfo, preset) });
-  const hardwareSupported = await canEncodeVideo('avc', {
+  const dimensions = { width: plan.width, height: plan.height };
+  let hardwareAcceleration = plan.hardwareAcceleration;
+  let encoderSupported = await canEncodeVideo(plan.codec, {
     ...dimensions,
-    quality,
-    hardwareAcceleration: 'prefer-hardware'
+    quality: plan.quality,
+    hardwareAcceleration
   });
-  if (!hardwareSupported) throw new Error('Der H.264-Hardwareencoder unterstützt diese Auflösung nicht.');
+  if (!encoderSupported && hardwareAcceleration === 'prefer-hardware') {
+    encoderSupported = await canEncodeVideo(plan.codec, {
+      ...dimensions,
+      quality: plan.quality,
+      hardwareAcceleration: 'no-preference'
+    });
+    if (encoderSupported) {
+      hardwareAcceleration = 'no-preference';
+      log('Encoder-Fallback', 'Die Hardware-Vorgabe ist nicht verfügbar; der Browser wählt automatisch.', 'warning');
+    }
+  }
+  if (!encoderSupported) throw new Error(`${plan.codec.toUpperCase()} unterstützt ${plan.width} × ${plan.height} mit diesen Einstellungen nicht.`);
+
+  const scaleNeeded = plan.width !== inputInfo.width
+    || plan.height !== inputInfo.height
+    || !!plan.crop
+    || plan.rotation !== 0;
+  activeScaler = scaleNeeded ? plan.scaler : null;
+  log('Video-Ausgabe', `${plan.codec.toUpperCase()} · ${plan.width} × ${plan.height} · ${formatRate(plan.bitrate)}`);
+  log(
+    scaleNeeded ? 'Skalierung' : 'Direkter Bildpfad',
+    scaleNeeded
+      ? `${plan.scaler === 'quality' ? 'Mehrstufig, höchste Qualität' : 'Schneller Ein-Pass-Pfad'} · ${plan.fit}`
+      : 'Keine Canvas-Skalierung nötig.',
+    'success'
+  );
+  log('Encoder', hardwareAcceleration === 'prefer-hardware' ? 'Hardware-Encoder wird bevorzugt.' : hardwareAcceleration === 'prefer-software' ? 'Software-Encoder wird bevorzugt.' : 'Browser wählt den besten Encoder.');
 
   const format = new Mp4OutputFormat({ fastStart: false });
   let audioOptions: ConversionAudioOptions | undefined;
   const audioTrack = await mediaInput.getPrimaryAudioTrack();
-  if (audioTrack) {
+  if (plan.audioMode === 'discard') {
+    audioOptions = { discard: true };
+    log('Audio', 'Audiospur wird entfernt.');
+  } else if (audioTrack) {
     const codec = await audioTrack.getCodec();
-    if (!codec || !format.getSupportedAudioCodecs().includes(codec)) {
+    const forceAac = plan.audioMode === 'aac';
+    if (forceAac || !codec || !format.getSupportedAudioCodecs().includes(codec)) {
       if (!await audioTrack.canDecode()) throw new Error('Die Audiospur kann nicht in MP4 übernommen werden.');
-      const encoding = lossyAudioConfig(preset);
+      const encoding = {
+        numberOfChannels: plan.audioChannels,
+        sampleRate: plan.audioSampleRate,
+        quality: new Quality({ bitrate: plan.audioBitrate })
+      };
       await registerAudioEncoder('aac', encoding);
       audioOptions = { codec: 'aac', forceTranscode: true, ...encoding };
+      log('Audio', `AAC · ${formatRate(plan.audioBitrate)} · ${plan.audioChannels} Kanal/Kanäle`);
+    } else {
+      log('Audio', `${String(codec).toUpperCase()} wird ohne erneute Kodierung übernommen.`, 'success');
     }
+  } else {
+    log('Audio', 'Keine Audiospur vorhanden.');
   }
 
   const fileName = outputName('mp4');
-  const expectedBytes = estimatedVideoSize(inputInfo, preset);
+  const expectedBytes = manual ? estimatedManualVideoSize(inputInfo, manual) : estimatedVideoSize(inputInfo, preset);
   const { root, target } = await createOutputTarget(fileName, expectedBytes);
+  log('Lokaler Speicher bereit', `Geschätzte Ausgabe ${formatBytes(expectedBytes)} · direktes Streaming`, 'success');
   let output: Output | null = null;
   let conversion: Conversion | null = null;
   try {
     output = new Output({ format, target });
+    const videoOptions: ConversionVideoOptions = {
+      codec: plan.codec,
+      quality: plan.quality,
+      hardwareAcceleration,
+      forceTranscode: true,
+      keyFrameInterval: plan.keyFrameInterval,
+      ...(plan.frameRate ? { frameRate: plan.frameRate } : {}),
+      ...(plan.rotation ? { rotate: plan.rotation } : {}),
+      ...(plan.crop ? { crop: plan.crop } : {}),
+      ...(scaleNeeded ? {
+        width: plan.width,
+        height: plan.height,
+        fit: plan.fit
+      } : {})
+    };
     conversion = await Conversion.init({
       input: mediaInput,
       output,
       tracks: 'primary',
-      video: {
-        width: dimensions.width,
-        height: dimensions.height,
-        fit: 'contain',
-        codec: 'avc',
-        quality,
-        hardwareAcceleration: 'prefer-hardware',
-        forceTranscode: true,
-        keyFrameInterval: 5
-      },
+      video: videoOptions,
       audio: audioOptions,
+      ...(plan.trim ? { trim: plan.trim } : {}),
+      ...(!plan.preserveMetadata ? { tags: {} } : {}),
       showWarnings: false
     });
-    if (!conversion.isValid || conversion.discardedTracks.some(({ track }) => track.type === 'video' || track.type === 'audio')) {
+    const unexpectedDiscard = conversion.discardedTracks.some(({ track }) =>
+      track.type === 'video' || (track.type === 'audio' && plan.audioMode !== 'discard'));
+    if (!conversion.isValid || unexpectedDiscard) {
       throw new Error('Mindestens eine Medien-Spur kann nicht in MP4 übernommen werden.');
     }
-    conversion.onProgress = (progress, time) => send({ type: 'progress', progress, time, hardware: true });
-    send({ type: 'phase', phase: 'Video wird hardwarebeschleunigt' });
+    let milestone = 0;
+    conversion.onProgress = (progress, time) => {
+      send({ type: 'progress', progress, time, hardwarePreferred: hardwareAcceleration === 'prefer-hardware' });
+      const nextMilestone = Math.floor(progress * 10) * 10;
+      if (nextMilestone >= milestone + 10 && nextMilestone < 100) {
+        milestone = nextMilestone;
+        log(`${milestone} % verarbeitet`, `${Math.round(time)} Sekunden Videomaterial abgeschlossen.`, 'success');
+      }
+    };
+    send({ type: 'phase', phase: 'Video wird verarbeitet' });
+    log('Pipeline gestartet', 'Dekodieren, skalieren, kodieren und schreiben laufen parallel.');
     await conversion.execute();
   } catch (error) {
     if (conversion) await conversion.cancel().catch(() => {});
     else if (output) await output.cancel().catch(() => {});
     await root.removeEntry(fileName).catch(() => {});
     throw error;
+  } finally {
+    activeScaler = null;
   }
 
-  send({ type: 'done', fileName, mime: 'video/mp4', hardware: true });
+  log('Ausgabe abgeschlossen', fileName, 'success');
+  send({ type: 'done', fileName, mime: 'video/mp4', hardwarePreferred: hardwareAcceleration === 'prefer-hardware' });
 }
 
-async function transcode(preset: PresetId, outputFormat: OutputFormatId) {
+async function transcode(preset: PresetId, outputFormat: OutputFormatId, manual?: ManualVideoSettings) {
   if (!inputInfo || !inputFile || !mediaInput) throw new Error('Bitte zuerst ein Medium auswählen.');
   if (inputInfo.audioOnly) {
     await audioTranscode(preset, outputFormat === 'mp4' ? 'm4a' : outputFormat);
   } else {
-    await videoTranscode(preset);
+    await videoTranscode(preset, manual);
   }
 }
 
 ctx.onmessage = async ({ data }: MessageEvent<WorkerRequest>) => {
   try {
     if (data.type === 'analyze') await analyze(data.file);
-    if (data.type === 'transcode') await transcode(data.preset, data.outputFormat);
+    if (data.type === 'transcode') await transcode(data.preset, data.outputFormat, data.manual);
   } catch (error) {
     send({ type: 'error', message: error instanceof Error ? error.message : 'Unbekannter Fehler' });
   }

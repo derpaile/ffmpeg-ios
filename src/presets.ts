@@ -1,4 +1,4 @@
-import type { MediaInfo, OutputFormatId, PresetId } from './types';
+import type { ManualVideoSettings, MediaInfo, OutputFormatId, PresetId } from './types';
 
 export const AUDIO_BITRATES = {
   small: 96_000,
@@ -7,14 +7,21 @@ export const AUDIO_BITRATES = {
 } as const;
 
 export const VIDEO_PRESETS = {
-  small: { maxWidth: 1280, nominalVideoBitrate: 2_500_000, audioBitrate: 96_000, ratio: 0.24 },
-  balanced: { maxWidth: 1920, nominalVideoBitrate: 5_000_000, audioBitrate: 128_000, ratio: 0.44 },
-  quality: { maxWidth: Infinity, nominalVideoBitrate: 18_000_000, audioBitrate: 160_000, ratio: 0.7 }
+  small: { maxLongEdge: 1280, nominalVideoBitrate: 2_500_000, audioBitrate: 96_000, ratio: 0.24 },
+  balanced: { maxLongEdge: 1920, nominalVideoBitrate: 5_000_000, audioBitrate: 128_000, ratio: 0.44 },
+  quality: { maxLongEdge: Infinity, nominalVideoBitrate: 18_000_000, audioBitrate: 160_000, ratio: 0.7 }
 } as const;
 
 export function targetDimensions(info: Pick<MediaInfo, 'width' | 'height'>, preset: PresetId) {
-  const maxWidth = VIDEO_PRESETS[preset].maxWidth;
-  const scale = Number.isFinite(maxWidth) && info.width > maxWidth ? maxWidth / info.width : 1;
+  const maxLongEdge = VIDEO_PRESETS[preset].maxLongEdge;
+  const longEdge = Math.max(info.width, info.height);
+  const scale = Number.isFinite(maxLongEdge) && longEdge > maxLongEdge ? maxLongEdge / longEdge : 1;
+  const even = (value: number) => Math.max(2, Math.round(value * scale / 2) * 2);
+  return { width: even(info.width), height: even(info.height) };
+}
+
+export function dimensionsForLongEdge(info: Pick<MediaInfo, 'width' | 'height'>, longEdge: number) {
+  const scale = Math.min(1, longEdge / Math.max(info.width, info.height));
   const even = (value: number) => Math.max(2, Math.round(value * scale / 2) * 2);
   return { width: even(info.width), height: even(info.height) };
 }
@@ -33,6 +40,17 @@ export function estimatedVideoSize(info: Pick<MediaInfo, 'size' | 'duration' | '
   const audioBitrate = Math.max(info.audioBitrate, settings.audioBitrate);
   const bytes = info.duration * (targetVideoBitrate(info, preset) + audioBitrate) / 8 * 1.01;
   return Math.min(bytes, info.size * 0.95);
+}
+
+export function estimatedManualVideoSize(
+  info: Pick<MediaInfo, 'duration' | 'audioBitrate'>,
+  settings: ManualVideoSettings
+) {
+  const duration = Math.max(0, (settings.trimEnd > settings.trimStart ? settings.trimEnd : info.duration) - settings.trimStart);
+  const audioBitrate = settings.audioMode === 'discard'
+    ? 0
+    : settings.audioMode === 'aac' ? settings.audioBitrate : info.audioBitrate;
+  return duration * (settings.bitrate + audioBitrate) / 8 * 1.02;
 }
 
 export function estimatedAudioSize(
