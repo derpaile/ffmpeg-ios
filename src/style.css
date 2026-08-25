@@ -95,6 +95,9 @@ footer span { color: #f2a38c; }
 .estimate small { grid-column: 1 / -1; color: var(--muted); font-size: 9px; }
 .format-row { margin: 14px 0; display: flex; justify-content: space-between; align-items: center; font-size: 12px; font-weight: 750; }
 .format-row select { color: var(--ink); background: var(--paper); border: 1px solid rgba(23,61,53,.15); border-radius: 9px; padding: 8px 25px 8px 10px; }
+.lossless-note { background: var(--paper); border: 1px solid rgba(23,61,53,.12); border-radius: 14px; padding: 16px; display: flex; flex-direction: column; gap: 5px; }
+.lossless-note b { font-size: 14px; }
+.lossless-note span { color: var(--muted); font-size: 11px; line-height: 1.45; }
 .warning, .background-note { background: #fff2dc; border: 1px solid #efcf96; color: #6f5428; padding: 13px 15px; border-radius: 12px; display: flex; flex-direction: column; gap: 5px; font-size: 11px; margin-top: 14px; }
 .cta { width: 100%; min-height: 57px; border: 0; border-radius: 14px; background: var(--ink); color: white; font-weight: 800; display: flex; align-items: center; justify-content: center; gap: 10px; cursor: pointer; box-shadow: 0 12px 25px rgba(23,61,53,.15); }
 .cta i { font-size: 21px; font-style: normal; }

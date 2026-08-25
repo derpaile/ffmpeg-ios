@@ -1,16 +1,14 @@
 import './style.css';
-import { estimatedVideoSize } from './presets';
-import type { MediaInfo, PresetId, WorkerResponse } from './types';
+import { estimatedAudioSize, estimatedVideoSize } from './presets';
+import type { MediaInfo, OutputFormatId, PresetId, WorkerResponse } from './types';
 
-const MAX_VIDEO_FILE_SIZE = 1024 * 1024 * 1024;
-const MAX_SOFTWARE_FILE_SIZE = 200 * 1024 * 1024;
 const app = document.querySelector<HTMLDivElement>('#app')!;
 
 let worker = createWorker();
 let selectedFile: File | null = null;
 let info: MediaInfo | null = null;
 let preset: PresetId = 'balanced';
-let outputFormat: 'mp4' | 'm4a' | 'mp3' | 'wav' = 'mp4';
+let outputFormat: OutputFormatId = 'mp4';
 let startedAt = 0;
 let result: { file: File; url: string; hardware: boolean } | null = null;
 
@@ -34,7 +32,8 @@ const icon = (name: 'photos' | 'folder' | 'check' | 'shield' | 'spark' | 'share'
 };
 
 function formatBytes(bytes: number) {
-  if (!bytes) return '0 MB';
+  if (!bytes) return '0 KB';
+  if (bytes < 1024 ** 2) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
   return bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GB` : `${(bytes / 1024 ** 2).toFixed(bytes < 10 * 1024 ** 2 ? 1 : 0)} MB`;
 }
 
@@ -47,10 +46,7 @@ function formatTime(seconds: number) {
 
 function estimatedSize() {
   if (!info) return 0;
-  if (info.audioOnly) {
-    const kbps = outputFormat === 'wav' ? 1411 : preset === 'small' ? 96 : preset === 'quality' ? 160 : 128;
-    return info.duration * kbps * 125;
-  }
+  if (info.audioOnly) return estimatedAudioSize(info, preset, outputFormat === 'mp4' ? 'm4a' : outputFormat);
   return estimatedVideoSize(info, preset);
 }
 
@@ -64,11 +60,11 @@ function renderHome() {
         <p>Komprimiere Videos und Audio direkt auf deinem iPhone – ohne Upload, ohne Konto.</p>
         <div class="actions">
           <button class="primary" id="photos">${icon('photos')}<span><b>Video aus Fotos</b><small>Aus deiner Mediathek wählen</small></span><i>›</i></button>
-          <button class="secondary" id="files">${icon('folder')}<span><b>Audio oder Video aus Dateien</b><small>MOV, MP4, M4A, MP3, WAV</small></span><i>›</i></button>
+          <button class="secondary" id="files">${icon('folder')}<span><b>Audio oder Video aus Dateien</b><small>MOV, MP4, M4A, MP3, WAV, FLAC</small></span><i>›</i></button>
         </div>
         <input hidden id="photoInput" type="file" accept="video/*,.mov,.mp4,.m4v" />
-        <input hidden id="fileInput" type="file" accept="video/*,audio/*,.mov,.mp4,.m4v,.m4a,.mp3,.aac,.wav" />
-        <p class="limit">Videos bis ${formatBytes(MAX_VIDEO_FILE_SIZE)} · Audio bis ${formatBytes(MAX_SOFTWARE_FILE_SIZE)} · lokal</p>
+        <input hidden id="fileInput" type="file" accept="video/*,audio/*,.mov,.mp4,.m4v,.m4a,.mp3,.aac,.wav,.flac" />
+        <p class="limit">Keine feste Dateigrenze · abhängig vom freien Gerätespeicher</p>
       </section>
       <section class="trust">
         <article>${icon('shield')}<div><b>Privat per Prinzip</b><span>Deine Dateien verlassen dieses Gerät nicht.</span></div></article>
@@ -83,12 +79,6 @@ function renderHome() {
 }
 
 async function selectFile(file: File) {
-  const audioFile = file.type.startsWith('audio/') || /\.(m4a|mp3|aac|wav)$/i.test(file.name);
-  const limit = audioFile ? MAX_SOFTWARE_FILE_SIZE : MAX_VIDEO_FILE_SIZE;
-  if (file.size > limit) {
-    showToast(`Diese Datei ist ${formatBytes(file.size)} groß. Das lokale Limit liegt bei ${formatBytes(limit)}.`);
-    return;
-  }
   selectedFile = file;
   info = null;
   renderAnalysis('Kompressor wird vorbereitet');
@@ -104,18 +94,19 @@ function renderAnalysis(phase: string) {
 function renderPreset() {
   if (!info) return;
   if (info.audioOnly) outputFormat = outputFormat === 'mp4' ? 'm4a' : outputFormat;
+  const losslessAudio = info.audioOnly && (outputFormat === 'wav' || outputFormat === 'flac');
   app.innerHTML = `<main class="shell process-shell"><header><a class="brand" href="#"><span class="mark">K</span><span>Kompakt</span></a><button class="text-button" id="reset">Neu wählen</button></header>
     <section class="work">
       <div class="step"><span>2 von 5</span><i><b style="width:40%"></b></i></div>
       <div class="file-card"><div class="file-icon">${info.audioOnly ? '♪' : '▶'}</div><div><b>${info.name}</b><span>${formatTime(info.duration)} · ${info.audioOnly ? info.codec : `${info.width} × ${info.height}`} · ${formatBytes(info.size)}</span></div>${icon('check')}</div>
       ${info.hdr ? '<div class="warning"><b>HDR-Video erkannt</b><span>Das MVP konvertiert HDR noch nicht zuverlässig. Für korrekte Farben bitte eine SDR-Version verwenden.</span></div>' : ''}
       <div class="section-title"><div class="eyebrow">KOMPRESSION</div><h2>Wie klein soll es werden?</h2><p>Du kannst die Auswahl vor dem Start noch ändern.</p></div>
-      <div class="presets">
+      ${info.audioOnly ? `<div class="format-row"><label>Ausgabeformat</label><select id="format"><option value="m4a" ${outputFormat === 'm4a' ? 'selected' : ''}>M4A / AAC</option><option value="mp3" ${outputFormat === 'mp3' ? 'selected' : ''}>MP3</option><option value="flac" ${outputFormat === 'flac' ? 'selected' : ''}>FLAC (verlustfrei)</option><option value="wav" ${outputFormat === 'wav' ? 'selected' : ''}>WAV (verlustfrei)</option></select></div>` : ''}
+      ${losslessAudio ? `<div class="lossless-note"><b>Verlustfreie Ausgabe</b><span>${outputFormat.toUpperCase()} erhält die Audiodaten ohne verlustbehaftete Kompression; eine Qualitätsstufe ist nicht nötig.</span></div>` : `<div class="presets">
         ${presetCard('small', 'Klein', info.audioOnly ? '96 kbit/s' : 'Bis 720p · Hardware-H.264', 'Für Nachrichten und schnellen Versand')}
         ${presetCard('balanced', 'Ausgewogen', info.audioOnly ? '128 kbit/s' : 'Bis 1080p · Hardware-H.264', 'Gute Qualität bei deutlich weniger Größe', true)}
         ${presetCard('quality', 'Hohe Qualität', info.audioOnly ? '160 kbit/s' : 'Originalauflösung · Hardware-H.264', 'Mehr Details, größere Datei')}
-      </div>
-      ${info.audioOnly ? `<div class="format-row"><label>Ausgabeformat</label><select id="format"><option value="m4a" ${outputFormat === 'm4a' ? 'selected' : ''}>M4A / AAC</option><option value="mp3" ${outputFormat === 'mp3' ? 'selected' : ''}>MP3</option><option value="wav" ${outputFormat === 'wav' ? 'selected' : ''}>WAV</option></select></div>` : ''}
+      </div>`}
       <div class="estimate"><span>Geschätzte Zielgröße</span><b>≈ ${formatBytes(estimatedSize())}</b><small>Die tatsächliche Größe hängt vom Inhalt ab.</small></div>
       <button class="cta" id="start" ${info.hdr ? 'disabled' : ''}>Verarbeitung starten <i>→</i></button>
     </section></main>`;
@@ -148,42 +139,29 @@ function renderProgress(phase: string, progress: number, elapsed: number) {
   document.querySelector('#cancel')?.addEventListener('click', cancel);
 }
 
-async function storeInOpfs(file: File) {
-  try {
-    const root = await navigator.storage.getDirectory();
-    const handle = await root.getFileHandle(file.name, { create: true });
-    const writable = await handle.createWritable();
-    await writable.write(file);
-    await writable.close();
-    return await handle.getFile();
-  } catch { return file; }
-}
-
-async function handleDone(data: Uint8Array | undefined, fileName: string, mime: string, stored: boolean, hardware: boolean) {
+async function handleDone(fileName: string, mime: string, hardware: boolean) {
   sessionStorage.removeItem('kompakt-active');
-  let file: File;
-  if (stored) {
-    const root = await navigator.storage.getDirectory();
-    const storedFile = await (await root.getFileHandle(fileName)).getFile();
-    file = storedFile.type === mime ? storedFile : new File([storedFile], fileName, { type: mime });
-  } else {
-    if (!data) throw new Error('Die Ausgabedatei fehlt.');
-    file = await storeInOpfs(new File([new Uint8Array(data).buffer], fileName, { type: mime }));
-  }
+  const root = await navigator.storage.getDirectory();
+  const storedFile = await (await root.getFileHandle(fileName)).getFile();
+  const file = storedFile.type === mime ? storedFile : new File([storedFile], fileName, { type: mime });
   result = { file, url: URL.createObjectURL(file), hardware };
   renderDone();
 }
 
 function renderDone() {
   if (!result) return;
-  const saved = selectedFile ? Math.max(0, 1 - result.file.size / selectedFile.size) : 0;
+  const inputSize = selectedFile?.size || 0;
+  const delta = inputSize ? Math.abs(1 - result.file.size / inputSize) : 0;
+  const sizeSummary = !inputSize || result.file.size === inputSize
+    ? 'Gleiche Größe'
+    : `${Math.round(delta * 100)} % ${result.file.size < inputSize ? 'kleiner' : 'größer'}`;
   app.innerHTML = `<main class="shell process-shell"><header><a class="brand"><span class="mark">K</span><span>Kompakt</span></a></header>
-    <section class="done-state"><div class="success">${icon('check')}</div><div class="eyebrow">FERTIG</div><h2>Dein Medium ist kompakt.</h2><p>${result.hardware ? 'Hardwarebeschleunigt · ' : ''}${Math.round(saved * 100)} % kleiner · ${formatBytes(result.file.size)}</p>
+    <section class="done-state"><div class="success">${icon('check')}</div><div class="eyebrow">FERTIG</div><h2>Dein Medium ist fertig.</h2><p>${result.hardware ? 'Hardwarebeschleunigt · ' : ''}${sizeSummary} · ${formatBytes(result.file.size)}</p>
       <div class="size-compare"><div><span>Vorher</span><b>${formatBytes(selectedFile?.size || 0)}</b></div><i>→</i><div><span>Nachher</span><b>${formatBytes(result.file.size)}</b></div></div>
-      <button class="cta" id="share">${icon('share')} In Fotos / Dateien sichern</button>
+      <button class="cta" id="share">${icon('share')} ${info?.audioOnly ? 'In Dateien sichern' : 'In Fotos / Dateien sichern'}</button>
       <a class="download" href="${result.url}" download="${result.file.name}">Stattdessen herunterladen</a>
       <button class="text-button another" id="again">Weiteres Medium verkleinern</button>
-      <small class="save-help">Im Teilen-Menü „Video sichern“ oder „In Dateien sichern“ wählen.</small>
+      <small class="save-help">Im Teilen-Menü ${info?.audioOnly ? '„In Dateien sichern“' : '„Video sichern“ oder „In Dateien sichern“'} wählen.</small>
     </section></main>`;
   document.querySelector('#share')?.addEventListener('click', shareResult);
   document.querySelector('#again')?.addEventListener('click', reset);
@@ -206,16 +184,31 @@ function handleWorkerMessage(message: WorkerResponse) {
   }
   if (message.type === 'analysis') { info = message.info; renderPreset(); }
   if (message.type === 'progress') renderProgress(info?.audioOnly ? 'Audio wird komprimiert' : message.hardware ? 'Video wird hardwarebeschleunigt' : 'Video wird komprimiert', message.progress, (Date.now() - startedAt) / 1000);
-  if (message.type === 'done') handleDone(message.data, message.fileName, message.mime, message.stored, message.hardware).catch(() => {
+  if (message.type === 'done') handleDone(message.fileName, message.mime, message.hardware).catch(() => {
     showToast('Die fertige Datei konnte nicht aus dem lokalen Speicher gelesen werden.');
     renderPreset();
   });
   if (message.type === 'error') { sessionStorage.removeItem('kompakt-active'); showToast(message.message); info ? renderPreset() : renderHome(); }
 }
 
+function currentOutputName() {
+  if (!info) return null;
+  const extension = info.audioOnly ? (outputFormat === 'mp4' ? 'm4a' : outputFormat) : 'mp4';
+  return `${info.name.replace(/\.[^.]+$/, '')}-kompakt.${extension}`;
+}
+
+async function removeLocalOutput(fileName: string) {
+  try {
+    const root = await navigator.storage.getDirectory();
+    await root.removeEntry(fileName);
+  } catch { /* Die Datei wurde noch nicht angelegt oder bereits entfernt. */ }
+}
+
 function cancel() {
+  const partialOutput = currentOutputName();
   worker.terminate();
   worker = createWorker();
+  if (partialOutput) void removeLocalOutput(partialOutput);
   sessionStorage.removeItem('kompakt-active');
   info = null;
   selectedFile = null;
@@ -224,7 +217,9 @@ function cancel() {
 
 function reset(event?: Event) {
   event?.preventDefault();
+  const storedOutput = result?.file.name;
   if (result) URL.revokeObjectURL(result.url);
+  if (storedOutput) void removeLocalOutput(storedOutput);
   result = null; info = null; selectedFile = null; startedAt = 0;
   renderHome();
 }

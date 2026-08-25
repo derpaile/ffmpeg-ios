@@ -1,4 +1,10 @@
-import type { MediaInfo, PresetId } from './types';
+import type { MediaInfo, OutputFormatId, PresetId } from './types';
+
+export const AUDIO_BITRATES = {
+  small: 96_000,
+  balanced: 128_000,
+  quality: 160_000
+} as const;
 
 export const VIDEO_PRESETS = {
   small: { maxWidth: 1280, nominalVideoBitrate: 2_500_000, audioBitrate: 96_000, ratio: 0.24 },
@@ -27,4 +33,14 @@ export function estimatedVideoSize(info: Pick<MediaInfo, 'size' | 'duration' | '
   const audioBitrate = Math.max(info.audioBitrate, settings.audioBitrate);
   const bytes = info.duration * (targetVideoBitrate(info, preset) + audioBitrate) / 8 * 1.01;
   return Math.min(bytes, info.size * 0.95);
+}
+
+export function estimatedAudioSize(
+  info: Pick<MediaInfo, 'duration' | 'sampleRate' | 'channels'>,
+  preset: PresetId,
+  format: Exclude<OutputFormatId, 'mp4'>
+) {
+  if (format === 'm4a' || format === 'mp3') return info.duration * AUDIO_BITRATES[preset] / 8 * 1.02;
+  const pcmBytes = info.duration * (info.sampleRate || 48_000) * Math.max(1, info.channels || 2) * 2;
+  return format === 'wav' ? pcmBytes + 4096 : pcmBytes * 0.65;
 }
