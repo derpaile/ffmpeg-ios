@@ -1,4 +1,4 @@
-const CACHE = 'kompakt-v3';
+const CACHE = 'kompakt-v4';
 const SHELL = ['/', '/index.html', '/manifest.webmanifest', '/icons/icon-192.svg', '/icons/icon-512.svg'];
 const DEVELOPMENT = location.port && !['80', '443'].includes(location.port);
 const FFMPEG_WASM = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm/ffmpeg-core.wasm';

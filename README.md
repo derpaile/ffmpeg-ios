@@ -19,9 +19,10 @@ Cloudflare-Veröffentlichung: `npm run deploy`. Der fest versionierte FFmpeg-WAS
 - automatische Medienanalyse mit FFprobe
 - drei Kompressionsstufen
 - H.264/AAC, M4A/AAC, MP3 und WAV als Ausgabe
-- FFmpeg-WASM vollständig in Workern, erst nach Dateiauswahl geladen
-- Offline-Cache, 200-MB-Gerätelimit, OPFS-Zwischenspeicher
+- hardwarebeschleunigtes H.264 über WebCodecs/Mediabunny mit FFmpeg-WASM als Fallback
+- stückweises Lesen und direkte OPFS-Ausgabe für Videos bis 1 GB
+- 200-MB-Sicherheitslimit für Audio und den speicherintensiven Software-Fallback
 - iOS-Teilen-Menü mit Download-Fallback
 - HDR-Erkennung mit sicherer Ablehnung im MVP
 
-Die Verarbeitung sollte auf iOS im Vordergrund bleiben. Das Größenlimit ist als Konstante `MAX_FILE_SIZE` in `src/main.ts` hinterlegt und muss nach Gerätetests angepasst werden.
+Die Verarbeitung sollte auf iOS im Vordergrund bleiben. Große Dateien benötigen einen von WebCodecs unterstützten Videoeingang; Audio und der FFmpeg-Softwarepfad bleiben auf 200 MB begrenzt.

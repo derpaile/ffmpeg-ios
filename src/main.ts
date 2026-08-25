@@ -1,7 +1,9 @@
 import './style.css';
+import { estimatedVideoSize } from './presets';
 import type { MediaInfo, PresetId, WorkerResponse } from './types';
 
-const MAX_FILE_SIZE = 200 * 1024 * 1024;
+const MAX_VIDEO_FILE_SIZE = 1024 * 1024 * 1024;
+const MAX_SOFTWARE_FILE_SIZE = 200 * 1024 * 1024;
 const app = document.querySelector<HTMLDivElement>('#app')!;
 
 let worker = createWorker();
@@ -10,7 +12,7 @@ let info: MediaInfo | null = null;
 let preset: PresetId = 'balanced';
 let outputFormat: 'mp4' | 'm4a' | 'mp3' | 'wav' = 'mp4';
 let startedAt = 0;
-let result: { file: File; url: string } | null = null;
+let result: { file: File; url: string; hardware: boolean } | null = null;
 
 function createWorker() {
   const instance = new Worker(new URL('./media.worker.ts', import.meta.url), { type: 'module' });
@@ -49,8 +51,7 @@ function estimatedSize() {
     const kbps = outputFormat === 'wav' ? 1411 : preset === 'small' ? 96 : preset === 'quality' ? 160 : 128;
     return info.duration * kbps * 125;
   }
-  const ratio = preset === 'small' ? .24 : preset === 'balanced' ? .44 : .7;
-  return Math.min(info.size * ratio, info.size * .95);
+  return estimatedVideoSize(info, preset);
 }
 
 function renderHome() {
@@ -67,7 +68,7 @@ function renderHome() {
         </div>
         <input hidden id="photoInput" type="file" accept="video/*,.mov,.mp4,.m4v" />
         <input hidden id="fileInput" type="file" accept="video/*,audio/*,.mov,.mp4,.m4v,.m4a,.mp3,.aac,.wav" />
-        <p class="limit">Bis ${formatBytes(MAX_FILE_SIZE)} · lokal verarbeitet</p>
+        <p class="limit">Videos bis ${formatBytes(MAX_VIDEO_FILE_SIZE)} · Audio bis ${formatBytes(MAX_SOFTWARE_FILE_SIZE)} · lokal</p>
       </section>
       <section class="trust">
         <article>${icon('shield')}<div><b>Privat per Prinzip</b><span>Deine Dateien verlassen dieses Gerät nicht.</span></div></article>
@@ -82,8 +83,10 @@ function renderHome() {
 }
 
 async function selectFile(file: File) {
-  if (file.size > MAX_FILE_SIZE) {
-    showToast(`Diese Datei ist ${formatBytes(file.size)} groß. Das lokale Limit liegt bei ${formatBytes(MAX_FILE_SIZE)}.`);
+  const audioFile = file.type.startsWith('audio/') || /\.(m4a|mp3|aac|wav)$/i.test(file.name);
+  const limit = audioFile ? MAX_SOFTWARE_FILE_SIZE : MAX_VIDEO_FILE_SIZE;
+  if (file.size > limit) {
+    showToast(`Diese Datei ist ${formatBytes(file.size)} groß. Das lokale Limit liegt bei ${formatBytes(limit)}.`);
     return;
   }
   selectedFile = file;
@@ -94,7 +97,7 @@ async function selectFile(file: File) {
 
 function renderAnalysis(phase: string) {
   app.innerHTML = `<main class="shell process-shell"><header><a class="brand" href="#"><span class="mark">K</span><span>Kompakt</span></a><button class="icon-button" id="reset" aria-label="Schließen">${icon('close')}</button></header>
-    <section class="center-state"><div class="loader"><span></span></div><div class="eyebrow">AUTOMATISCHE ANALYSE</div><h2>${phase}</h2><p>${selectedFile?.name || ''}</p><small>FFmpeg wird nur bei Bedarf geladen.</small></section></main>`;
+    <section class="center-state"><div class="loader"><span></span></div><div class="eyebrow">AUTOMATISCHE ANALYSE</div><h2>${phase}</h2><p>${selectedFile?.name || ''}</p><small>Hardwarebeschleunigung wird automatisch bevorzugt.</small></section></main>`;
   document.querySelector('#reset')?.addEventListener('click', reset);
 }
 
@@ -108,9 +111,9 @@ function renderPreset() {
       ${info.hdr ? '<div class="warning"><b>HDR-Video erkannt</b><span>Das MVP konvertiert HDR noch nicht zuverlässig. Für korrekte Farben bitte eine SDR-Version verwenden.</span></div>' : ''}
       <div class="section-title"><div class="eyebrow">KOMPRESSION</div><h2>Wie klein soll es werden?</h2><p>Du kannst die Auswahl vor dem Start noch ändern.</p></div>
       <div class="presets">
-        ${presetCard('small', 'Klein', info.audioOnly ? '96 kbit/s' : 'Bis 720p · CRF 28', 'Für Nachrichten und schnellen Versand')}
-        ${presetCard('balanced', 'Ausgewogen', info.audioOnly ? '128 kbit/s' : 'Bis 1080p · CRF 24', 'Gute Qualität bei deutlich weniger Größe', true)}
-        ${presetCard('quality', 'Hohe Qualität', info.audioOnly ? '160 kbit/s' : 'Originalauflösung · CRF 20', 'Mehr Details, größere Datei')}
+        ${presetCard('small', 'Klein', info.audioOnly ? '96 kbit/s' : 'Bis 720p · Hardware-H.264', 'Für Nachrichten und schnellen Versand')}
+        ${presetCard('balanced', 'Ausgewogen', info.audioOnly ? '128 kbit/s' : 'Bis 1080p · Hardware-H.264', 'Gute Qualität bei deutlich weniger Größe', true)}
+        ${presetCard('quality', 'Hohe Qualität', info.audioOnly ? '160 kbit/s' : 'Originalauflösung · Hardware-H.264', 'Mehr Details, größere Datei')}
       </div>
       ${info.audioOnly ? `<div class="format-row"><label>Ausgabeformat</label><select id="format"><option value="m4a" ${outputFormat === 'm4a' ? 'selected' : ''}>M4A / AAC</option><option value="mp3" ${outputFormat === 'mp3' ? 'selected' : ''}>MP3</option><option value="wav" ${outputFormat === 'wav' ? 'selected' : ''}>WAV</option></select></div>` : ''}
       <div class="estimate"><span>Geschätzte Zielgröße</span><b>≈ ${formatBytes(estimatedSize())}</b><small>Die tatsächliche Größe hängt vom Inhalt ab.</small></div>
@@ -152,14 +155,22 @@ async function storeInOpfs(file: File) {
     const writable = await handle.createWritable();
     await writable.write(file);
     await writable.close();
-  } catch { /* Teilen und Download funktionieren auch ohne OPFS. */ }
+    return await handle.getFile();
+  } catch { return file; }
 }
 
-async function handleDone(data: Uint8Array, fileName: string, mime: string) {
+async function handleDone(data: Uint8Array | undefined, fileName: string, mime: string, stored: boolean, hardware: boolean) {
   sessionStorage.removeItem('kompakt-active');
-  const file = new File([new Uint8Array(data).buffer], fileName, { type: mime });
-  await storeInOpfs(file);
-  result = { file, url: URL.createObjectURL(file) };
+  let file: File;
+  if (stored) {
+    const root = await navigator.storage.getDirectory();
+    const storedFile = await (await root.getFileHandle(fileName)).getFile();
+    file = storedFile.type === mime ? storedFile : new File([storedFile], fileName, { type: mime });
+  } else {
+    if (!data) throw new Error('Die Ausgabedatei fehlt.');
+    file = await storeInOpfs(new File([new Uint8Array(data).buffer], fileName, { type: mime }));
+  }
+  result = { file, url: URL.createObjectURL(file), hardware };
   renderDone();
 }
 
@@ -167,7 +178,7 @@ function renderDone() {
   if (!result) return;
   const saved = selectedFile ? Math.max(0, 1 - result.file.size / selectedFile.size) : 0;
   app.innerHTML = `<main class="shell process-shell"><header><a class="brand"><span class="mark">K</span><span>Kompakt</span></a></header>
-    <section class="done-state"><div class="success">${icon('check')}</div><div class="eyebrow">FERTIG</div><h2>Dein Medium ist kompakt.</h2><p>${Math.round(saved * 100)} % kleiner · ${formatBytes(result.file.size)}</p>
+    <section class="done-state"><div class="success">${icon('check')}</div><div class="eyebrow">FERTIG</div><h2>Dein Medium ist kompakt.</h2><p>${result.hardware ? 'Hardwarebeschleunigt · ' : ''}${Math.round(saved * 100)} % kleiner · ${formatBytes(result.file.size)}</p>
       <div class="size-compare"><div><span>Vorher</span><b>${formatBytes(selectedFile?.size || 0)}</b></div><i>→</i><div><span>Nachher</span><b>${formatBytes(result.file.size)}</b></div></div>
       <button class="cta" id="share">${icon('share')} In Fotos / Dateien sichern</button>
       <a class="download" href="${result.url}" download="${result.file.name}">Stattdessen herunterladen</a>
@@ -194,8 +205,11 @@ function handleWorkerMessage(message: WorkerResponse) {
     else if (startedAt) renderProgress(message.phase, 0, (Date.now() - startedAt) / 1000);
   }
   if (message.type === 'analysis') { info = message.info; renderPreset(); }
-  if (message.type === 'progress') renderProgress(info?.audioOnly ? 'Audio wird komprimiert' : 'Video wird komprimiert', message.progress, (Date.now() - startedAt) / 1000);
-  if (message.type === 'done') handleDone(message.data, message.fileName, message.mime);
+  if (message.type === 'progress') renderProgress(info?.audioOnly ? 'Audio wird komprimiert' : message.hardware ? 'Video wird hardwarebeschleunigt' : 'Video wird komprimiert', message.progress, (Date.now() - startedAt) / 1000);
+  if (message.type === 'done') handleDone(message.data, message.fileName, message.mime, message.stored, message.hardware).catch(() => {
+    showToast('Die fertige Datei konnte nicht aus dem lokalen Speicher gelesen werden.');
+    renderPreset();
+  });
   if (message.type === 'error') { sessionStorage.removeItem('kompakt-active'); showToast(message.message); info ? renderPreset() : renderHome(); }
 }
 
